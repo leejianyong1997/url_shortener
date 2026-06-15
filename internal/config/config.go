@@ -36,10 +36,16 @@ func Load() Config {
 }
 
 // DSN builds the MySQL data source name that database/sql needs.
-// parseTime=true tells the driver to scan DATETIME/TIMESTAMP columns straight
-// into Go's time.Time instead of returning them as raw bytes.
+//
+//   - parseTime=true scans DATETIME/TIMESTAMP straight into time.Time.
+//   - loc=UTC parses those times as UTC, and time_zone='+00:00' forces the
+//     MySQL SESSION to UTC too. Both sides MUST agree: if the server session is
+//     in a non-UTC zone (e.g. +08) while the driver assumes UTC, every time read
+//     back is wrong by the offset, which silently breaks comparisons like link
+//     expiry. (%%27 and %%2B are URL-encoded ' and + inside the DSN.)
 func (c Config) DSN() string {
-	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4",
+	return fmt.Sprintf(
+		"%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4&loc=UTC&time_zone=%%27%%2B00%%3A00%%27",
 		c.DBUser, c.DBPassword, c.DBHost, c.DBPort, c.DBName)
 }
 
