@@ -1,0 +1,17 @@
+# Compiled binaries
+*.exe
+*.exe~
+/server
+/bin/
+
+# Local environment (never commit secrets)
+.env
+
+# Go workspace files
+go.work
+go.work.sum
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
