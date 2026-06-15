@@ -1,35 +1,91 @@
 // Command server is the entry point for the URL shortener API.
 //
-// In Go, an executable lives in `package main` and starts at func main().
-// There is no framework bootstrapping like Laravel's public/index.php — this
-// file IS the application's starting point.
+// This file is the "composition root": it reads config, builds dependencies
+// (DB pool, click counter), wires them together, starts the HTTP server, and
+// shuts everything down cleanly. There is no service container like Laravel's —
+// we assemble everything by hand, on purpose.
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/joho/godotenv"
+
+	"github.com/leejianyong1997/url_shortener/internal/clicks"
+	"github.com/leejianyong1997/url_shortener/internal/config"
+	"github.com/leejianyong1997/url_shortener/internal/handler"
+	"github.com/leejianyong1997/url_shortener/internal/shortener"
+	"github.com/leejianyong1997/url_shortener/internal/storage"
 )
 
-func main() {
-	// http.ServeMux is Go's built-in HTTP router. Since Go 1.22 it understands
-	// method + path patterns like "GET /health", so we need no framework.
-	mux := http.NewServeMux()
+const flushInterval = 2 * time.Second
 
-	// Our first route. A handler is just a function with this exact signature:
-	//   func(w http.ResponseWriter, r *http.Request)
-	// w is where you write the response; r holds the incoming request.
+func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("no .env file found, using real environment variables")
+	}
+	cfg := config.Load()
+
+	db, err := storage.Connect(cfg.DSN())
+	if err != nil {
+		log.Fatalf("database: %v", err)
+	}
+	defer db.Close()
+	log.Printf("connected to MySQL %s:%s/%s", cfg.DBHost, cfg.DBPort, cfg.DBName)
+
+	// ctx is cancelled when the process gets Ctrl+C (SIGINT) or SIGTERM. Every
+	// long-running piece watches it to shut down gracefully.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Composition root: store -> counter -> service -> handler.
+	store := storage.NewLinkStore(db)
+	counter := clicks.NewCounter(store)
+	svc := shortener.NewService(store, counter)
+	h := handler.New(svc, cfg.BaseURL)
+
+	// Background goroutine: flush buffered clicks to MySQL every few seconds.
+	go counter.Run(ctx, flushInterval)
+
+	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Write sends the body. We didn't call WriteHeader, so status is 200.
 		w.Write([]byte(`{"status":"ok"}`))
 	})
+	mux.HandleFunc("POST /shorten", h.Shorten)
+	mux.HandleFunc("GET /{code}", h.Redirect)
 
-	const addr = ":8080"
-	log.Printf("listening on http://localhost%s", addr)
+	srv := &http.Server{Addr: cfg.ServerAddr, Handler: mux}
 
-	// ListenAndServe starts the server and blocks forever. It only returns if
-	// something goes wrong (e.g. port already in use), and then we crash loudly.
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("server error: %v", err)
+	// Start the server in its own goroutine so main can wait for the signal.
+	go func() {
+		log.Printf("listening on http://localhost%s", cfg.ServerAddr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done() // block here until Ctrl+C
+	log.Println("shutting down...")
+
+	// Stop accepting new requests; give in-flight ones up to 5s to finish.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http shutdown: %v", err)
 	}
+
+	// Final flush so clicks buffered since the last tick are not lost. We use a
+	// fresh context because ctx is already cancelled.
+	if err := counter.Flush(context.Background()); err != nil {
+		log.Printf("final clicks flush: %v", err)
+	}
+	log.Println("stopped")
 }
