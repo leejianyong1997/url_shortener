@@ -46,7 +46,8 @@ Run the migration once. It creates the `url_shortener` database and the `links`
 table.
 
 ```bash
-mysql -u root < migrations/001_create_links.sql
+# apply every migration in order
+for f in migrations/*.sql; do mysql -u root < "$f"; done
 ```
 
 > XAMPP on Windows: use the bundled client, e.g.
@@ -107,9 +108,10 @@ Create a short link for a long URL.
 
 **Request body**
 
-| Field | Type   | Required | Description                          |
-| ----- | ------ | -------- | ------------------------------------ |
-| `url` | string | yes      | Absolute `http`/`https` URL to shorten |
+| Field   | Type   | Required | Description                                        |
+| ------- | ------ | -------- | -------------------------------------------------- |
+| `url`   | string | yes      | Absolute `http`/`https` URL to shorten             |
+| `alias` | string | no       | Custom code: 3–32 chars of `[A-Za-z0-9_-]`, unique |
 
 ```bash
 curl -X POST http://localhost:8080/shorten \
@@ -127,17 +129,33 @@ curl -X POST http://localhost:8080/shorten \
 }
 ```
 
+**With a custom alias** — pass an optional `alias`:
+
+```bash
+curl -X POST http://localhost:8080/shorten \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://go.dev/doc/","alias":"go-docs"}'
+```
+
+A taken alias returns `409 Conflict`:
+
+```json
+{ "error": "alias is already taken" }
+```
+
 **Validation errors** — `400 Bad Request`:
 
 ```json
 { "error": "field 'url' must be a valid http(s) URL" }
 ```
 
-| Condition                 | Status | Message                              |
-| ------------------------- | ------ | ------------------------------------ |
-| Body is not valid JSON    | 400    | `request body must be valid JSON`    |
-| `url` missing or empty    | 400    | `field 'url' is required`            |
-| `url` not a valid http(s) | 400    | `field 'url' must be a valid http(s) URL` |
+| Condition                  | Status | Message                                   |
+| -------------------------- | ------ | ----------------------------------------- |
+| Body is not valid JSON     | 400    | `request body must be valid JSON`         |
+| `url` missing or empty     | 400    | `field 'url' is required`                 |
+| `url` not a valid http(s)  | 400    | `field 'url' must be a valid http(s) URL` |
+| `alias` malformed/reserved | 400    | `alias must be 3-32 chars ...`            |
+| `alias` already taken      | 409    | `alias is already taken`                  |
 
 ---
 

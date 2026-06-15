@@ -17,7 +17,7 @@ import (
 // Shortener is the business-logic contract the HTTP layer needs. Declared here,
 // in the consumer, so handlers can be driven by a fake in tests.
 type Shortener interface {
-	Shorten(ctx context.Context, longURL string) (*model.Link, error)
+	Shorten(ctx context.Context, longURL, alias string) (*model.Link, error)
 	Resolve(ctx context.Context, code string) (*model.Link, error)
 	Stats(ctx context.Context, code string) (*model.Link, error)
 }
@@ -36,7 +36,8 @@ func New(svc Shortener, baseURL string) *Handler {
 // shortenRequest/shortenResponse are the JSON shapes for POST /shorten. The
 // `json:"..."` struct tags map Go field names <-> JSON keys.
 type shortenRequest struct {
-	URL string `json:"url"`
+	URL   string `json:"url"`
+	Alias string `json:"alias"` // optional: a user-chosen short code
 }
 
 type shortenResponse struct {
@@ -73,8 +74,20 @@ func (h *Handler) Shorten(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	link, err := h.svc.Shorten(r.Context(), longURL)
+	alias := strings.TrimSpace(req.Alias)
+	if alias != "" && !isValidAlias(alias) {
+		writeError(w, http.StatusBadRequest,
+			"alias must be 3-32 chars of letters, digits, '-' or '_', and not a reserved word")
+		return
+	}
+
+	link, err := h.svc.Shorten(r.Context(), longURL, alias)
 	if err != nil {
+		// A taken alias is a client error (409), not a server error.
+		if errors.Is(err, shortener.ErrCodeExists) {
+			writeError(w, http.StatusConflict, "alias is already taken")
+			return
+		}
 		// Log the real cause server-side; return a generic message to clients.
 		log.Printf("shorten %q: %v", longURL, err)
 		writeError(w, http.StatusInternalServerError, "could not create short link")
@@ -134,6 +147,29 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 		Clicks:    link.Clicks,
 		CreatedAt: link.CreatedAt,
 	})
+}
+
+// reservedCodes are short codes that would collide with fixed routes (e.g. a
+// link aliased "health" would be shadowed by GET /health and never redirect).
+var reservedCodes = map[string]bool{
+	"health":  true,
+	"shorten": true,
+	"api":     true,
+}
+
+// isValidAlias accepts 3-32 chars of [a-zA-Z0-9_-] that are not reserved.
+func isValidAlias(s string) bool {
+	if len(s) < 3 || len(s) > 32 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return !reservedCodes[s]
 }
 
 // isValidHTTPURL accepts only absolute http/https URLs with a host.

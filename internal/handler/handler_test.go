@@ -16,13 +16,13 @@ import (
 // fakeShortener stands in for *shortener.Service so handlers can be tested with
 // no real service or database. Each test sets only the func it needs.
 type fakeShortener struct {
-	shortenFn func(ctx context.Context, longURL string) (*model.Link, error)
+	shortenFn func(ctx context.Context, longURL, alias string) (*model.Link, error)
 	resolveFn func(ctx context.Context, code string) (*model.Link, error)
 	statsFn   func(ctx context.Context, code string) (*model.Link, error)
 }
 
-func (f *fakeShortener) Shorten(ctx context.Context, longURL string) (*model.Link, error) {
-	return f.shortenFn(ctx, longURL)
+func (f *fakeShortener) Shorten(ctx context.Context, longURL, alias string) (*model.Link, error) {
+	return f.shortenFn(ctx, longURL, alias)
 }
 
 func (f *fakeShortener) Resolve(ctx context.Context, code string) (*model.Link, error) {
@@ -35,7 +35,7 @@ func (f *fakeShortener) Stats(ctx context.Context, code string) (*model.Link, er
 
 func TestShortenReturns201WithShortURL(t *testing.T) {
 	fake := &fakeShortener{
-		shortenFn: func(ctx context.Context, longURL string) (*model.Link, error) {
+		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
 			return &model.Link{Code: "abc1234", LongURL: longURL}, nil
 		},
 	}
@@ -64,7 +64,7 @@ func TestShortenReturns201WithShortURL(t *testing.T) {
 
 func TestShortenRejectsInvalidURL(t *testing.T) {
 	fake := &fakeShortener{
-		shortenFn: func(ctx context.Context, longURL string) (*model.Link, error) {
+		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
 			t.Fatal("service must NOT be called for an invalid URL")
 			return nil, nil
 		},
@@ -83,7 +83,7 @@ func TestShortenRejectsInvalidURL(t *testing.T) {
 
 func TestShortenRejectsEmptyURL(t *testing.T) {
 	fake := &fakeShortener{
-		shortenFn: func(ctx context.Context, longURL string) (*model.Link, error) {
+		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
 			t.Fatal("service must NOT be called for an empty URL")
 			return nil, nil
 		},
@@ -110,6 +110,73 @@ func TestShortenRejectsMalformedJSON(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got status %d, want 400", rec.Code)
+	}
+}
+
+func TestShortenAcceptsCustomAlias(t *testing.T) {
+	fake := &fakeShortener{
+		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
+			return &model.Link{Code: alias, LongURL: longURL}, nil
+		},
+	}
+	h := New(fake, "http://localhost:8080")
+
+	req := httptest.NewRequest(http.MethodPost, "/shorten",
+		strings.NewReader(`{"url":"https://example.com","alias":"my-link"}`))
+	rec := httptest.NewRecorder()
+
+	h.Shorten(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got status %d, want 201", rec.Code)
+	}
+	var resp struct {
+		ShortURL string `json:"short_url"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("response was not valid JSON: %v", err)
+	}
+	if resp.ShortURL != "http://localhost:8080/my-link" {
+		t.Errorf("got short_url %q, want http://localhost:8080/my-link", resp.ShortURL)
+	}
+}
+
+func TestShortenRejectsInvalidAlias(t *testing.T) {
+	fake := &fakeShortener{
+		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
+			t.Fatal("service must NOT be called for an invalid alias")
+			return nil, nil
+		},
+	}
+	h := New(fake, "http://localhost:8080")
+
+	req := httptest.NewRequest(http.MethodPost, "/shorten",
+		strings.NewReader(`{"url":"https://example.com","alias":"a b"}`)) // space is invalid
+	rec := httptest.NewRecorder()
+
+	h.Shorten(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got status %d, want 400", rec.Code)
+	}
+}
+
+func TestShortenReturns409ForTakenAlias(t *testing.T) {
+	fake := &fakeShortener{
+		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
+			return nil, shortener.ErrCodeExists
+		},
+	}
+	h := New(fake, "http://localhost:8080")
+
+	req := httptest.NewRequest(http.MethodPost, "/shorten",
+		strings.NewReader(`{"url":"https://example.com","alias":"taken"}`))
+	rec := httptest.NewRecorder()
+
+	h.Shorten(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("got status %d, want 409", rec.Code)
 	}
 }
 

@@ -57,9 +57,12 @@ func NewService(store Store, clicks ClickRecorder) *Service {
 	}
 }
 
-// Shorten generates a unique short code for longURL and stores it.
+// Shorten stores longURL under a short code and returns the new link. If alias
+// is non-empty it is used verbatim as the code, and a collision is a hard
+// conflict (ErrCodeExists) rather than a retry — the caller asked for that exact
+// code. If alias is empty, a random base62 code is generated.
 //
-// Uniqueness strategy (the interview answer):
+// Uniqueness strategy for the random case (the interview answer):
 //  1. Generate a random base62 code.
 //  2. Try to insert it. The DB's UNIQUE index on `code` is the source of truth.
 //  3. If the insert collides (ErrCodeExists), the code was already taken, so we
@@ -69,7 +72,18 @@ func NewService(store Store, clicks ClickRecorder) *Service {
 //  5. After maxRetries collisions we give up with an error. With a 3.5-trillion
 //     keyspace this effectively never happens, but the cap prevents an infinite
 //     loop if the table somehow filled up.
-func (s *Service) Shorten(ctx context.Context, longURL string) (*model.Link, error) {
+func (s *Service) Shorten(ctx context.Context, longURL, alias string) (*model.Link, error) {
+	if alias != "" {
+		link := &model.Link{Code: alias, LongURL: longURL}
+		if err := s.store.CreateLink(ctx, link); err != nil {
+			if errors.Is(err, ErrCodeExists) {
+				return nil, ErrCodeExists // taken — handler turns this into 409
+			}
+			return nil, fmt.Errorf("create link: %w", err)
+		}
+		return link, nil
+	}
+
 	for attempt := 0; attempt < s.maxRetries; attempt++ {
 		code, err := GenerateCode(s.codeLength)
 		if err != nil {
