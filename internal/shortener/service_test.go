@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/leejianyong1997/url_shortener/internal/model"
 )
@@ -62,7 +63,7 @@ func (r *fakeRecorder) Pending(code string) int64 {
 func TestShortenStoresLinkWithGeneratedCode(t *testing.T) {
 	svc := NewService(&fakeStore{}, &fakeRecorder{})
 
-	link, err := svc.Shorten(context.Background(), "https://example.com/page", "")
+	link, err := svc.Shorten(context.Background(), CreateParams{LongURL: "https://example.com/page"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestShortenRetriesOnCollision(t *testing.T) {
 	store := &fakeStore{failTimes: 2} // first two inserts "collide"
 	svc := NewService(store, &fakeRecorder{})
 
-	link, err := svc.Shorten(context.Background(), "https://example.com", "")
+	link, err := svc.Shorten(context.Background(), CreateParams{LongURL: "https://example.com"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestShortenGivesUpAfterMaxRetries(t *testing.T) {
 	store := &fakeStore{failTimes: 1000} // every insert collides
 	svc := NewService(store, &fakeRecorder{})
 
-	_, err := svc.Shorten(context.Background(), "https://example.com", "")
+	_, err := svc.Shorten(context.Background(), CreateParams{LongURL: "https://example.com"})
 	if err == nil {
 		t.Fatal("expected an error after exhausting retries, got nil")
 	}
@@ -105,7 +106,7 @@ func TestShortenDoesNotRetryOnOtherErrors(t *testing.T) {
 	store := &fakeStore{failWith: dbDown}
 	svc := NewService(store, &fakeRecorder{})
 
-	_, err := svc.Shorten(context.Background(), "https://example.com", "")
+	_, err := svc.Shorten(context.Background(), CreateParams{LongURL: "https://example.com"})
 	if !errors.Is(err, dbDown) {
 		t.Errorf("expected the underlying error to be preserved, got %v", err)
 	}
@@ -151,7 +152,7 @@ func TestShortenUsesCustomAlias(t *testing.T) {
 	store := &fakeStore{}
 	svc := NewService(store, &fakeRecorder{})
 
-	link, err := svc.Shorten(context.Background(), "https://example.com", "my-link")
+	link, err := svc.Shorten(context.Background(), CreateParams{LongURL: "https://example.com", Alias: "my-link"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -167,7 +168,7 @@ func TestShortenReturnsConflictForTakenAlias(t *testing.T) {
 	store := &fakeStore{failTimes: 1} // the alias is already taken
 	svc := NewService(store, &fakeRecorder{})
 
-	_, err := svc.Shorten(context.Background(), "https://example.com", "taken")
+	_, err := svc.Shorten(context.Background(), CreateParams{LongURL: "https://example.com", Alias: "taken"})
 	if !errors.Is(err, ErrCodeExists) {
 		t.Errorf("expected ErrCodeExists for a taken alias, got %v", err)
 	}
@@ -198,5 +199,35 @@ func TestStatsReturnsNotFoundForMissingCode(t *testing.T) {
 	_, err := svc.Stats(context.Background(), "missing")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestShortenSetsExpiry(t *testing.T) {
+	svc := NewService(&fakeStore{}, &fakeRecorder{})
+	exp := time.Now().Add(time.Hour)
+
+	link, err := svc.Shorten(context.Background(), CreateParams{LongURL: "https://example.com", ExpiresAt: &exp})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if link.ExpiresAt == nil || !link.ExpiresAt.Equal(exp) {
+		t.Errorf("ExpiresAt = %v, want %v", link.ExpiresAt, exp)
+	}
+}
+
+func TestResolveReturnsGoneForExpiredLink(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	store := &fakeStore{links: map[string]*model.Link{
+		"old": {Code: "old", LongURL: "https://example.com", ExpiresAt: &past},
+	}}
+	recorder := &fakeRecorder{}
+	svc := NewService(store, recorder)
+
+	_, err := svc.Resolve(context.Background(), "old")
+	if !errors.Is(err, ErrGone) {
+		t.Errorf("expected ErrGone for an expired link, got %v", err)
+	}
+	if recorder.calls != 0 {
+		t.Error("an expired link must NOT be counted as a click")
 	}
 }

@@ -16,13 +16,13 @@ import (
 // fakeShortener stands in for *shortener.Service so handlers can be tested with
 // no real service or database. Each test sets only the func it needs.
 type fakeShortener struct {
-	shortenFn func(ctx context.Context, longURL, alias string) (*model.Link, error)
+	shortenFn func(ctx context.Context, p shortener.CreateParams) (*model.Link, error)
 	resolveFn func(ctx context.Context, code string) (*model.Link, error)
 	statsFn   func(ctx context.Context, code string) (*model.Link, error)
 }
 
-func (f *fakeShortener) Shorten(ctx context.Context, longURL, alias string) (*model.Link, error) {
-	return f.shortenFn(ctx, longURL, alias)
+func (f *fakeShortener) Shorten(ctx context.Context, p shortener.CreateParams) (*model.Link, error) {
+	return f.shortenFn(ctx, p)
 }
 
 func (f *fakeShortener) Resolve(ctx context.Context, code string) (*model.Link, error) {
@@ -35,8 +35,8 @@ func (f *fakeShortener) Stats(ctx context.Context, code string) (*model.Link, er
 
 func TestShortenReturns201WithShortURL(t *testing.T) {
 	fake := &fakeShortener{
-		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
-			return &model.Link{Code: "abc1234", LongURL: longURL}, nil
+		shortenFn: func(ctx context.Context, p shortener.CreateParams) (*model.Link, error) {
+			return &model.Link{Code: "abc1234", LongURL: p.LongURL}, nil
 		},
 	}
 	h := New(fake, "http://localhost:8080")
@@ -64,7 +64,7 @@ func TestShortenReturns201WithShortURL(t *testing.T) {
 
 func TestShortenRejectsInvalidURL(t *testing.T) {
 	fake := &fakeShortener{
-		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
+		shortenFn: func(ctx context.Context, p shortener.CreateParams) (*model.Link, error) {
 			t.Fatal("service must NOT be called for an invalid URL")
 			return nil, nil
 		},
@@ -83,7 +83,7 @@ func TestShortenRejectsInvalidURL(t *testing.T) {
 
 func TestShortenRejectsEmptyURL(t *testing.T) {
 	fake := &fakeShortener{
-		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
+		shortenFn: func(ctx context.Context, p shortener.CreateParams) (*model.Link, error) {
 			t.Fatal("service must NOT be called for an empty URL")
 			return nil, nil
 		},
@@ -115,8 +115,8 @@ func TestShortenRejectsMalformedJSON(t *testing.T) {
 
 func TestShortenAcceptsCustomAlias(t *testing.T) {
 	fake := &fakeShortener{
-		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
-			return &model.Link{Code: alias, LongURL: longURL}, nil
+		shortenFn: func(ctx context.Context, p shortener.CreateParams) (*model.Link, error) {
+			return &model.Link{Code: p.Alias, LongURL: p.LongURL}, nil
 		},
 	}
 	h := New(fake, "http://localhost:8080")
@@ -143,7 +143,7 @@ func TestShortenAcceptsCustomAlias(t *testing.T) {
 
 func TestShortenRejectsInvalidAlias(t *testing.T) {
 	fake := &fakeShortener{
-		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
+		shortenFn: func(ctx context.Context, p shortener.CreateParams) (*model.Link, error) {
 			t.Fatal("service must NOT be called for an invalid alias")
 			return nil, nil
 		},
@@ -163,7 +163,7 @@ func TestShortenRejectsInvalidAlias(t *testing.T) {
 
 func TestShortenReturns409ForTakenAlias(t *testing.T) {
 	fake := &fakeShortener{
-		shortenFn: func(ctx context.Context, longURL, alias string) (*model.Link, error) {
+		shortenFn: func(ctx context.Context, p shortener.CreateParams) (*model.Link, error) {
 			return nil, shortener.ErrCodeExists
 		},
 	}
@@ -271,5 +271,68 @@ func TestStatsReturns404ForUnknownCode(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("got status %d, want 404", rec.Code)
+	}
+}
+
+func TestShortenAcceptsExpiresIn(t *testing.T) {
+	var gotExpiry bool
+	fake := &fakeShortener{
+		shortenFn: func(ctx context.Context, p shortener.CreateParams) (*model.Link, error) {
+			gotExpiry = p.ExpiresAt != nil
+			return &model.Link{Code: "abc1234", LongURL: p.LongURL, ExpiresAt: p.ExpiresAt}, nil
+		},
+	}
+	h := New(fake, "http://localhost:8080")
+
+	req := httptest.NewRequest(http.MethodPost, "/shorten",
+		strings.NewReader(`{"url":"https://example.com","expires_in":3600}`))
+	rec := httptest.NewRecorder()
+
+	h.Shorten(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got status %d, want 201", rec.Code)
+	}
+	if !gotExpiry {
+		t.Error("expected the service to receive a non-nil ExpiresAt")
+	}
+}
+
+func TestShortenRejectsNegativeExpiresIn(t *testing.T) {
+	fake := &fakeShortener{
+		shortenFn: func(ctx context.Context, p shortener.CreateParams) (*model.Link, error) {
+			t.Fatal("service must NOT be called for a negative expires_in")
+			return nil, nil
+		},
+	}
+	h := New(fake, "http://localhost:8080")
+
+	req := httptest.NewRequest(http.MethodPost, "/shorten",
+		strings.NewReader(`{"url":"https://example.com","expires_in":-5}`))
+	rec := httptest.NewRecorder()
+
+	h.Shorten(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got status %d, want 400", rec.Code)
+	}
+}
+
+func TestRedirectReturns410ForExpiredLink(t *testing.T) {
+	fake := &fakeShortener{
+		resolveFn: func(ctx context.Context, code string) (*model.Link, error) {
+			return nil, shortener.ErrGone
+		},
+	}
+	h := New(fake, "http://localhost:8080")
+
+	req := httptest.NewRequest(http.MethodGet, "/old", nil)
+	req.SetPathValue("code", "old")
+	rec := httptest.NewRecorder()
+
+	h.Redirect(rec, req)
+
+	if rec.Code != http.StatusGone {
+		t.Errorf("got status %d, want 410", rec.Code)
 	}
 }

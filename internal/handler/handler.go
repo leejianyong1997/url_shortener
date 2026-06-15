@@ -17,7 +17,7 @@ import (
 // Shortener is the business-logic contract the HTTP layer needs. Declared here,
 // in the consumer, so handlers can be driven by a fake in tests.
 type Shortener interface {
-	Shorten(ctx context.Context, longURL, alias string) (*model.Link, error)
+	Shorten(ctx context.Context, p shortener.CreateParams) (*model.Link, error)
 	Resolve(ctx context.Context, code string) (*model.Link, error)
 	Stats(ctx context.Context, code string) (*model.Link, error)
 }
@@ -36,8 +36,9 @@ func New(svc Shortener, baseURL string) *Handler {
 // shortenRequest/shortenResponse are the JSON shapes for POST /shorten. The
 // `json:"..."` struct tags map Go field names <-> JSON keys.
 type shortenRequest struct {
-	URL   string `json:"url"`
-	Alias string `json:"alias"` // optional: a user-chosen short code
+	URL       string `json:"url"`
+	Alias     string `json:"alias"`      // optional: a user-chosen short code
+	ExpiresIn int    `json:"expires_in"` // optional: seconds until expiry (0 = never)
 }
 
 type shortenResponse struct {
@@ -48,11 +49,12 @@ type shortenResponse struct {
 
 // statsResponse is the JSON for GET /api/links/{code}/stats.
 type statsResponse struct {
-	Code      string    `json:"code"`
-	ShortURL  string    `json:"short_url"`
-	LongURL   string    `json:"long_url"`
-	Clicks    int64     `json:"clicks"`
-	CreatedAt time.Time `json:"created_at"`
+	Code      string     `json:"code"`
+	ShortURL  string     `json:"short_url"`
+	LongURL   string     `json:"long_url"`
+	Clicks    int64      `json:"clicks"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt *time.Time `json:"expires_at"`
 }
 
 // Shorten handles POST /shorten: read JSON, validate, create, return JSON.
@@ -81,7 +83,21 @@ func (h *Handler) Shorten(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	link, err := h.svc.Shorten(r.Context(), longURL, alias)
+	if req.ExpiresIn < 0 {
+		writeError(w, http.StatusBadRequest, "expires_in must be a positive number of seconds")
+		return
+	}
+	var expiresAt *time.Time
+	if req.ExpiresIn > 0 {
+		t := time.Now().Add(time.Duration(req.ExpiresIn) * time.Second)
+		expiresAt = &t
+	}
+
+	link, err := h.svc.Shorten(r.Context(), shortener.CreateParams{
+		LongURL:   longURL,
+		Alias:     alias,
+		ExpiresAt: expiresAt,
+	})
 	if err != nil {
 		// A taken alias is a client error (409), not a server error.
 		if errors.Is(err, shortener.ErrCodeExists) {
@@ -107,14 +123,16 @@ func (h *Handler) Redirect(w http.ResponseWriter, r *http.Request) {
 
 	link, err := h.svc.Resolve(r.Context(), code)
 	if err != nil {
-		// This is Go error handling instead of try/catch: we branch on the
-		// error VALUE. A known "not found" becomes 404; anything else is 500.
-		if errors.Is(err, shortener.ErrNotFound) {
+		// Go error handling instead of try/catch: branch on the error VALUE.
+		switch {
+		case errors.Is(err, shortener.ErrNotFound):
 			writeError(w, http.StatusNotFound, "short link not found")
-			return
+		case errors.Is(err, shortener.ErrGone):
+			writeError(w, http.StatusGone, "short link has expired")
+		default:
+			log.Printf("resolve %q: %v", code, err)
+			writeError(w, http.StatusInternalServerError, "could not resolve short link")
 		}
-		log.Printf("resolve %q: %v", code, err)
-		writeError(w, http.StatusInternalServerError, "could not resolve short link")
 		return
 	}
 
@@ -146,6 +164,7 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 		LongURL:   link.LongURL,
 		Clicks:    link.Clicks,
 		CreatedAt: link.CreatedAt,
+		ExpiresAt: link.ExpiresAt,
 	})
 }
 

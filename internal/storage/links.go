@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -39,8 +40,8 @@ var (
 // translate ONLY that specific case into shortener.ErrCodeExists, so the
 // service knows it was a collision (retry) versus a real failure (give up).
 func (s *LinkStore) CreateLink(ctx context.Context, link *model.Link) error {
-	const q = `INSERT INTO links (code, long_url) VALUES (?, ?)`
-	res, err := s.db.ExecContext(ctx, q, link.Code, link.LongURL)
+	const q = `INSERT INTO links (code, long_url, expires_at) VALUES (?, ?, ?)`
+	res, err := s.db.ExecContext(ctx, q, link.Code, link.LongURL, nullTime(link.ExpiresAt))
 	if err != nil {
 		var myErr *mysql.MySQLError
 		if errors.As(err, &myErr) && myErr.Number == 1062 {
@@ -62,12 +63,14 @@ func (s *LinkStore) CreateLink(ctx context.Context, link *model.Link) error {
 // the domain error shortener.ErrNotFound so upper layers don't depend on the
 // sql package.
 func (s *LinkStore) FindByCode(ctx context.Context, code string) (*model.Link, error) {
-	const q = `SELECT id, code, long_url, clicks, created_at FROM links WHERE code = ?`
+	const q = `SELECT id, code, long_url, clicks, created_at, expires_at FROM links WHERE code = ?`
 	var link model.Link
+	// expires_at is nullable, so we scan it into a sql.NullTime and convert.
+	var expiresAt sql.NullTime
 	// QueryRowContext + Scan copies each column into a Go field BY POSITION.
 	// You pass pointers (&link.ID, ...) so Scan can write into them.
 	err := s.db.QueryRowContext(ctx, q, code).Scan(
-		&link.ID, &link.Code, &link.LongURL, &link.Clicks, &link.CreatedAt,
+		&link.ID, &link.Code, &link.LongURL, &link.Clicks, &link.CreatedAt, &expiresAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, shortener.ErrNotFound
@@ -75,7 +78,19 @@ func (s *LinkStore) FindByCode(ctx context.Context, code string) (*model.Link, e
 	if err != nil {
 		return nil, fmt.Errorf("find link: %w", err)
 	}
+	if expiresAt.Valid {
+		link.ExpiresAt = &expiresAt.Time
+	}
 	return &link, nil
+}
+
+// nullTime converts an optional *time.Time into a sql.NullTime so a nil pointer
+// is stored as SQL NULL.
+func nullTime(t *time.Time) sql.NullTime {
+	if t == nil {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: *t, Valid: true}
 }
 
 // AddClicks applies a batch of buffered counts in a single transaction: one

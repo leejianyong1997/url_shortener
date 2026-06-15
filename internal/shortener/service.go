@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/leejianyong1997/url_shortener/internal/model"
 )
@@ -15,6 +16,10 @@ var ErrCodeExists = errors.New("short code already exists")
 // ErrNotFound signals that no link exists for a given code. The redirect
 // handler turns this into an HTTP 404.
 var ErrNotFound = errors.New("link not found")
+
+// ErrGone signals that a link exists but has expired. The redirect handler
+// turns this into an HTTP 410 Gone.
+var ErrGone = errors.New("link has expired")
 
 // Store is the persistence contract the Service needs — nothing more.
 //
@@ -35,6 +40,15 @@ type ClickRecorder interface {
 	// Pending reports clicks buffered in memory but not yet persisted, so Stats
 	// can return an exact total despite the write-behind buffer.
 	Pending(code string) int64
+}
+
+// CreateParams are the inputs for creating a short link. Only LongURL is
+// required; Alias and ExpiresAt are optional (a params struct keeps the call
+// readable as optional inputs grow).
+type CreateParams struct {
+	LongURL   string
+	Alias     string     // optional user-chosen code
+	ExpiresAt *time.Time // optional expiry; nil = never expires
 }
 
 // Service turns long URLs into stored short links.
@@ -72,9 +86,9 @@ func NewService(store Store, clicks ClickRecorder) *Service {
 //  5. After maxRetries collisions we give up with an error. With a 3.5-trillion
 //     keyspace this effectively never happens, but the cap prevents an infinite
 //     loop if the table somehow filled up.
-func (s *Service) Shorten(ctx context.Context, longURL, alias string) (*model.Link, error) {
-	if alias != "" {
-		link := &model.Link{Code: alias, LongURL: longURL}
+func (s *Service) Shorten(ctx context.Context, p CreateParams) (*model.Link, error) {
+	if p.Alias != "" {
+		link := &model.Link{Code: p.Alias, LongURL: p.LongURL, ExpiresAt: p.ExpiresAt}
 		if err := s.store.CreateLink(ctx, link); err != nil {
 			if errors.Is(err, ErrCodeExists) {
 				return nil, ErrCodeExists // taken — handler turns this into 409
@@ -90,7 +104,7 @@ func (s *Service) Shorten(ctx context.Context, longURL, alias string) (*model.Li
 			return nil, fmt.Errorf("generate code: %w", err)
 		}
 
-		link := &model.Link{Code: code, LongURL: longURL}
+		link := &model.Link{Code: code, LongURL: p.LongURL, ExpiresAt: p.ExpiresAt}
 		err = s.store.CreateLink(ctx, link)
 		switch {
 		case err == nil:
@@ -115,6 +129,9 @@ func (s *Service) Resolve(ctx context.Context, code string) (*model.Link, error)
 	link, err := s.store.FindByCode(ctx, code)
 	if err != nil {
 		return nil, err
+	}
+	if link.ExpiresAt != nil && time.Now().After(*link.ExpiresAt) {
+		return nil, ErrGone // exists but expired — handler returns 410
 	}
 	// Record the visit in memory and return immediately — the redirect never
 	// waits on a database write. The background flusher persists it later.

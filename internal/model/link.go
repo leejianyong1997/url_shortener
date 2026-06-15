@@ -13,4 +13,7 @@ type Link struct {
 	LongURL   string
 	Clicks    int64
 	CreatedAt time.Time
+	// ExpiresAt is a pointer so it can be nil: nil means the link never expires
+	// (stored as NULL in the database).
+	ExpiresAt *time.Time
 }

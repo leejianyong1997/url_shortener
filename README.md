@@ -110,8 +110,9 @@ Create a short link for a long URL.
 
 | Field   | Type   | Required | Description                                        |
 | ------- | ------ | -------- | -------------------------------------------------- |
-| `url`   | string | yes      | Absolute `http`/`https` URL to shorten             |
-| `alias` | string | no       | Custom code: 3–32 chars of `[A-Za-z0-9_-]`, unique |
+| `url`        | string  | yes | Absolute `http`/`https` URL to shorten             |
+| `alias`      | string  | no  | Custom code: 3–32 chars of `[A-Za-z0-9_-]`, unique |
+| `expires_in` | integer | no  | Seconds until the link expires (omit = never)      |
 
 ```bash
 curl -X POST http://localhost:8080/shorten \
@@ -143,6 +144,14 @@ A taken alias returns `409 Conflict`:
 { "error": "alias is already taken" }
 ```
 
+**With expiration** — `expires_in` in seconds:
+
+```bash
+curl -X POST http://localhost:8080/shorten \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://go.dev/doc/","expires_in":3600}'
+```
+
 **Validation errors** — `400 Bad Request`:
 
 ```json
@@ -156,6 +165,7 @@ A taken alias returns `409 Conflict`:
 | `url` not a valid http(s)  | 400    | `field 'url' must be a valid http(s) URL` |
 | `alias` malformed/reserved | 400    | `alias must be 3-32 chars ...`            |
 | `alias` already taken      | 409    | `alias is already taken`                  |
+| `expires_in` negative      | 400    | `expires_in must be a positive number ...`|
 
 ---
 
@@ -186,6 +196,12 @@ silently break click counting.
 { "error": "short link not found" }
 ```
 
+**Expired link** — `410 Gone`:
+
+```json
+{ "error": "short link has expired" }
+```
+
 ---
 
 ### `GET /api/links/{code}/stats`
@@ -206,7 +222,8 @@ curl http://localhost:8080/api/links/QvxNEc8/stats
   "short_url": "http://localhost:8080/QvxNEc8",
   "long_url": "https://go.dev/doc/effective_go",
   "clicks": 5,
-  "created_at": "2026-06-15T18:59:35Z"
+  "created_at": "2026-06-15T18:59:35Z",
+  "expires_at": null
 }
 ```
 
@@ -242,5 +259,5 @@ migrations/        SQL schema
 
 ## Roadmap
 
-- Custom aliases (user-chosen codes).
-- Link expiration.
+- Background cleanup of expired links (currently checked at read time, not purged).
+- Rate limiting.
