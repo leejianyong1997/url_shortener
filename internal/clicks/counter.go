@@ -64,6 +64,15 @@ func (c *Counter) Flush(ctx context.Context) error {
 	return nil
 }
 
+// Pending returns the clicks buffered for code that have not been flushed yet.
+// The stats endpoint adds this to the DB value so the reported total is exact
+// despite the write-behind buffer.
+func (c *Counter) Pending(code string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pending[code]
+}
+
 // Run flushes buffered counts every interval until ctx is cancelled. It is
 // meant to run in its own goroutine: `go counter.Run(ctx, 2*time.Second)`.
 // After Run returns, the caller should Flush once more to persist anything

@@ -105,3 +105,23 @@ func TestFlushKeepsCountsWhenFlusherFails(t *testing.T) {
 		t.Errorf("counts were lost after a failed flush: got %d, want 2", f.totals["abc"])
 	}
 }
+
+func TestPendingReflectsUnflushedCount(t *testing.T) {
+	c := NewCounter(newFakeFlusher())
+
+	c.Incr("abc")
+	c.Incr("abc")
+	c.Incr("xyz")
+
+	if got := c.Pending("abc"); got != 2 {
+		t.Errorf("Pending(abc) = %d, want 2", got)
+	}
+	if got := c.Pending("unknown"); got != 0 {
+		t.Errorf("Pending(unknown) = %d, want 0", got)
+	}
+
+	_ = c.Flush(context.Background())
+	if got := c.Pending("abc"); got != 0 {
+		t.Errorf("after flush, Pending(abc) = %d, want 0", got)
+	}
+}

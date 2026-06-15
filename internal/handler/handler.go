@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/leejianyong1997/url_shortener/internal/model"
 	"github.com/leejianyong1997/url_shortener/internal/shortener"
@@ -18,6 +19,7 @@ import (
 type Shortener interface {
 	Shorten(ctx context.Context, longURL string) (*model.Link, error)
 	Resolve(ctx context.Context, code string) (*model.Link, error)
+	Stats(ctx context.Context, code string) (*model.Link, error)
 }
 
 // Handler carries the dependencies every route needs.
@@ -41,6 +43,15 @@ type shortenResponse struct {
 	Code     string `json:"code"`
 	ShortURL string `json:"short_url"`
 	LongURL  string `json:"long_url"`
+}
+
+// statsResponse is the JSON for GET /api/links/{code}/stats.
+type statsResponse struct {
+	Code      string    `json:"code"`
+	ShortURL  string    `json:"short_url"`
+	LongURL   string    `json:"long_url"`
+	Clicks    int64     `json:"clicks"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Shorten handles POST /shorten: read JSON, validate, create, return JSON.
@@ -98,6 +109,31 @@ func (h *Handler) Redirect(w http.ResponseWriter, r *http.Request) {
 	// because browsers cache 301s hard: they would stop hitting us and our
 	// click counter would silently stop. 302 keeps every visit flowing through.
 	http.Redirect(w, r, link.LongURL, http.StatusFound)
+}
+
+// Stats handles GET /api/links/{code}/stats: return the link's metadata and an
+// accurate click count (without counting this request as a visit).
+func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
+	code := r.PathValue("code")
+
+	link, err := h.svc.Stats(r.Context(), code)
+	if err != nil {
+		if errors.Is(err, shortener.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "short link not found")
+			return
+		}
+		log.Printf("stats %q: %v", code, err)
+		writeError(w, http.StatusInternalServerError, "could not load stats")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, statsResponse{
+		Code:      link.Code,
+		ShortURL:  h.baseURL + "/" + link.Code,
+		LongURL:   link.LongURL,
+		Clicks:    link.Clicks,
+		CreatedAt: link.CreatedAt,
+	})
 }
 
 // isValidHTTPURL accepts only absolute http/https URLs with a host.

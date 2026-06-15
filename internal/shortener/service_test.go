@@ -47,11 +47,16 @@ func (f *fakeStore) FindByCode(ctx context.Context, code string) (*model.Link, e
 type fakeRecorder struct {
 	calls    int
 	lastCode string
+	pending  map[string]int64
 }
 
 func (r *fakeRecorder) Incr(code string) {
 	r.calls++
 	r.lastCode = code
+}
+
+func (r *fakeRecorder) Pending(code string) int64 {
+	return r.pending[code]
 }
 
 func TestShortenStoresLinkWithGeneratedCode(t *testing.T) {
@@ -139,5 +144,30 @@ func TestResolveReturnsNotFoundForMissingCode(t *testing.T) {
 	}
 	if recorder.calls != 0 {
 		t.Error("a missing code must NOT be counted as a click")
+	}
+}
+
+func TestStatsAddsBufferedClicksToStoredValue(t *testing.T) {
+	store := &fakeStore{links: map[string]*model.Link{
+		"abc1234": {Code: "abc1234", LongURL: "https://example.com", Clicks: 5},
+	}}
+	recorder := &fakeRecorder{pending: map[string]int64{"abc1234": 3}}
+	svc := NewService(store, recorder)
+
+	link, err := svc.Stats(context.Background(), "abc1234")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if link.Clicks != 8 {
+		t.Errorf("Clicks = %d, want 8 (5 stored + 3 buffered)", link.Clicks)
+	}
+}
+
+func TestStatsReturnsNotFoundForMissingCode(t *testing.T) {
+	svc := NewService(&fakeStore{}, &fakeRecorder{})
+
+	_, err := svc.Stats(context.Background(), "missing")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }

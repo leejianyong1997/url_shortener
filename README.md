@@ -168,6 +168,36 @@ silently break click counting.
 { "error": "short link not found" }
 ```
 
+---
+
+### `GET /api/links/{code}/stats`
+
+Return a code's metadata and click count **without** counting a visit. The total
+is exact: it includes clicks still buffered in memory that have not yet been
+flushed to the database.
+
+```bash
+curl http://localhost:8080/api/links/QvxNEc8/stats
+```
+
+`200 OK`
+
+```json
+{
+  "code": "QvxNEc8",
+  "short_url": "http://localhost:8080/QvxNEc8",
+  "long_url": "https://go.dev/doc/effective_go",
+  "clicks": 5,
+  "created_at": "2026-06-15T18:59:35Z"
+}
+```
+
+**Unknown code** — `404 Not Found`:
+
+```json
+{ "error": "short link not found" }
+```
+
 ## Running the Tests
 
 ```bash
@@ -194,7 +224,5 @@ migrations/        SQL schema
 
 ## Roadmap
 
-- `GET /api/links/{code}/stats` — return click count and metadata for a code
-  _(planned, not yet implemented)_.
 - Custom aliases (user-chosen codes).
 - Link expiration.

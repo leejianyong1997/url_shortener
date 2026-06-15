@@ -32,6 +32,9 @@ type Store interface {
 // cheap, non-blocking, and never returns an error on the hot redirect path.
 type ClickRecorder interface {
 	Incr(code string)
+	// Pending reports clicks buffered in memory but not yet persisted, so Stats
+	// can return an exact total despite the write-behind buffer.
+	Pending(code string) int64
 }
 
 // Service turns long URLs into stored short links.
@@ -102,5 +105,17 @@ func (s *Service) Resolve(ctx context.Context, code string) (*model.Link, error)
 	// Record the visit in memory and return immediately — the redirect never
 	// waits on a database write. The background flusher persists it later.
 	s.clicks.Incr(code)
+	return link, nil
+}
+
+// Stats returns the link for code with an accurate click total: the value
+// stored in the database PLUS any clicks still buffered in memory. Unlike
+// Resolve, it does not count a visit.
+func (s *Service) Stats(ctx context.Context, code string) (*model.Link, error) {
+	link, err := s.store.FindByCode(ctx, code)
+	if err != nil {
+		return nil, err
+	}
+	link.Clicks += s.clicks.Pending(code)
 	return link, nil
 }

@@ -60,6 +60,7 @@ func main() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.HandleFunc("POST /shorten", h.Shorten)
+	mux.HandleFunc("GET /api/links/{code}/stats", h.Stats)
 	mux.HandleFunc("GET /{code}", h.Redirect)
 
 	srv := &http.Server{Addr: cfg.ServerAddr, Handler: mux}

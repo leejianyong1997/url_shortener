@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/leejianyong1997/url_shortener/internal/model"
 	"github.com/leejianyong1997/url_shortener/internal/shortener"
@@ -17,6 +18,7 @@ import (
 type fakeShortener struct {
 	shortenFn func(ctx context.Context, longURL string) (*model.Link, error)
 	resolveFn func(ctx context.Context, code string) (*model.Link, error)
+	statsFn   func(ctx context.Context, code string) (*model.Link, error)
 }
 
 func (f *fakeShortener) Shorten(ctx context.Context, longURL string) (*model.Link, error) {
@@ -25,6 +27,10 @@ func (f *fakeShortener) Shorten(ctx context.Context, longURL string) (*model.Lin
 
 func (f *fakeShortener) Resolve(ctx context.Context, code string) (*model.Link, error) {
 	return f.resolveFn(ctx, code)
+}
+
+func (f *fakeShortener) Stats(ctx context.Context, code string) (*model.Link, error) {
+	return f.statsFn(ctx, code)
 }
 
 func TestShortenReturns201WithShortURL(t *testing.T) {
@@ -142,6 +148,59 @@ func TestRedirectReturns404ForUnknownCode(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	h.Redirect(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("got status %d, want 404", rec.Code)
+	}
+}
+
+func TestStatsReturns200WithClickCount(t *testing.T) {
+	created := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	fake := &fakeShortener{
+		statsFn: func(ctx context.Context, code string) (*model.Link, error) {
+			return &model.Link{Code: code, LongURL: "https://example.com", Clicks: 42, CreatedAt: created}, nil
+		},
+	}
+	h := New(fake, "http://localhost:8080")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/links/abc1234/stats", nil)
+	req.SetPathValue("code", "abc1234")
+	rec := httptest.NewRecorder()
+
+	h.Stats(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", rec.Code)
+	}
+	var resp struct {
+		Code     string `json:"code"`
+		ShortURL string `json:"short_url"`
+		Clicks   int64  `json:"clicks"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("response was not valid JSON: %v", err)
+	}
+	if resp.Clicks != 42 {
+		t.Errorf("got clicks %d, want 42", resp.Clicks)
+	}
+	if resp.ShortURL != "http://localhost:8080/abc1234" {
+		t.Errorf("got short_url %q", resp.ShortURL)
+	}
+}
+
+func TestStatsReturns404ForUnknownCode(t *testing.T) {
+	fake := &fakeShortener{
+		statsFn: func(ctx context.Context, code string) (*model.Link, error) {
+			return nil, shortener.ErrNotFound
+		},
+	}
+	h := New(fake, "http://localhost:8080")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/links/missing/stats", nil)
+	req.SetPathValue("code", "missing")
+	rec := httptest.NewRecorder()
+
+	h.Stats(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("got status %d, want 404", rec.Code)
